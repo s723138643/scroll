@@ -90,6 +90,7 @@ struct sway_output {
 	uint32_t refresh_nsec;
 	int max_render_time; // In milliseconds
 	struct wl_event_source *repaint_timer;
+	int repaint_retry;
 
 	struct sway_scroller_output_options scroller_options;
 	struct sway_animation_clock animation_clock;

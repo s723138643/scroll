@@ -1,5 +1,7 @@
+#include <asm-generic/errno-base.h>
 #include <assert.h>
 #include <drm_fourcc.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -54,7 +56,7 @@ static bool atomic_commit(drmModeAtomicReq *req, struct wlr_drm_backend *drm,
 	int ret = drmModeAtomicCommit(drm->fd, req, flags, page_flip);
 	if (ret != 0) {
 		enum wlr_log_importance log_level = WLR_ERROR;
-		if (flags & DRM_MODE_ATOMIC_TEST_ONLY) {
+		if (flags & DRM_MODE_ATOMIC_TEST_ONLY || errno == EBUSY) {
 			log_level = WLR_DEBUG;
 		}
 
