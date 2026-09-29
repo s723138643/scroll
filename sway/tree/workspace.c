@@ -746,7 +746,7 @@ static struct sway_workspace *workspace_output_prev_next_impl(
 		index = 0;
 	}
 	if (config->workspace_next_on_output_create_empty) {
-		if (index + dir >= vo->workspaces->length) {
+		if (index + dir >= vo->workspaces->length && !workspace_is_empty(workspace)) {
 			return virtual_output_create_workspace(vo);
 		}
 	}
