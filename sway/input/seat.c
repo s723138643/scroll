@@ -1173,13 +1173,15 @@ static void seat_set_workspace_focus(struct sway_seat *seat, struct sway_node *n
 				}
 			}
 		}
-		if (container->fullscreen) {
-			container_set_fullscreen(container, FULLSCREEN_WORKSPACE);
-			node_set_dirty(&container->node);
-			node_set_dirty(&new_workspace->node);
+		if (new_workspace) {
+			if (container->fullscreen) {
+				container_set_fullscreen(container, FULLSCREEN_WORKSPACE);
+				node_set_dirty(&container->node);
+				node_set_dirty(&new_workspace->node);
+			}
+			arrange_workspace(new_workspace);
+			container_raise_floating(container);
 		}
-		arrange_workspace(new_workspace);
-		container_raise_floating(container);
 	}
 	if (container && container->pending.workspace) {
 		if (container->pending.fullscreen_layout == FULLSCREEN_ENABLED &&
