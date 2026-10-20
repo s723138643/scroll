@@ -120,6 +120,19 @@ err:
 	return false;
 }
 
+static void unmapped_views_add(struct sway_view *view) {
+	if (list_find(root->unmapped_views, view) < 0) {
+		list_add(root->unmapped_views, view);
+	}
+}
+
+static void unmapped_views_remove(struct sway_view *view) {
+	int index = list_find(root->unmapped_views, view);
+	if (index >= 0) {
+		list_del(root->unmapped_views, index);
+	}
+}
+
 void view_destroy(struct sway_view *view) {
 	if (!sway_assert(view->surface == NULL, "Tried to free mapped view")) {
 		return;
@@ -133,10 +146,7 @@ void view_destroy(struct sway_view *view) {
 				"(might have a pending transaction?)")) {
 		return;
 	}
-	int index = list_find(root->unmapped_views, view);
-	if (index >= 0) {
-		list_del(root->unmapped_views, index);
-	}
+	unmapped_views_remove(view);
 	wl_list_remove(&view->events.unmap.listener_list);
 	list_free(view->executed_criteria);
 
@@ -914,6 +924,8 @@ void view_map(struct sway_view *view, struct wlr_surface *wlr_surface,
 	view->lua.mapped = true;
 	view->surface = wlr_surface;
 	view_populate_pid(view);
+	// X11 clients can remap an unmapped view, so make sure we remove it
+	unmapped_views_remove(view);
 	view->container = container_create(view);
 
 	if (view->ctx == NULL) {
@@ -1138,7 +1150,7 @@ void view_unmap(struct sway_view *view) {
 
 	struct sway_container *parent = view->container->pending.parent;
 	const bool fullscreen = view->container->fullscreen;
-	list_add(root->unmapped_views, view);
+	unmapped_views_add(view);
 	view->container->pending.alpha = 0.0f;
 	container_begin_destroy(view->container);
 	if (parent) {
