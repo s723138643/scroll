@@ -10,85 +10,100 @@ uniform bool flip_y;
 uniform float radius_top;
 uniform float radius_bottom;
 
-float antialias(float x, float x0, float x1, float fw) {
-    float xmax = max(x1, x + fw);
-    float xmin = min(x0, x - fw);
-    float len = xmax - xmin;
-    float d0 = abs(x + fw - x1);
-    float d1 = abs(x - fw - x0);
-    float overlap = len - d0 - d1;
-    float alpha = smoothstep(0.0, 1.0, overlap);
-    return alpha;
+// ---------------------------------------------------------------------------
+// Rounded corners, ported from niri (niri/src/render_helpers/shaders).
+//
+// The algorithm lives in niri's rounding_alpha.frag. wlroots has no per-corner
+// radius uniform, so the four radii are built from the existing
+// radius_top / radius_bottom pair.
+// ---------------------------------------------------------------------------
+
+// niri's `niri_scale` is the output scale, because niri expresses geometry and
+// radii in logical pixels. wlroots passes both in physical pixels, so the
+// equivalent antialiasing scale is 1.0 (a one-physical-pixel transition).
+const float niri_scale = 1.0;
+
+// Unified geometry space.
+//
+// niri maps input coordinates into a window-local "geometry space" with an
+// `input_to_geo` matrix and always evaluates the rounded-corner mask there.
+// wlroots exposes the same information via `box` and the output-transform
+// flags, so this builds the equivalent mapping. It returns
+// (coords.xy, size.xy): `coords` is relative to the top-left of the
+// untransformed geometry and `size` is that geometry's size, both in physical
+// pixels.
+vec4 niri_geo(vec2 frag) {
+    vec2 rel = frag - box.xy;
+    if (flip_x) {
+        rel.x = box.z - rel.x;
+    }
+    if (flip_y) {
+        rel.y = box.w - rel.y;
+    }
+    vec2 size;
+    if (swap_xy) {
+        rel = rel.yx;
+        size = vec2(box.w, box.z);
+    } else {
+        size = vec2(box.z, box.w);
+    }
+    return vec4(rel, size);
 }
 
-float fw2(float r, vec2 p) {
-    vec2 ap = abs(p);
-    return 0.5 * r / max(ap.x, ap.y);
+// Ported from niri's rounding_alpha.frag, with an extra `expand` term.
+//
+// `corner_radius` is the radius of the corner arc that is cut away, with its
+// center at `(corner_radius, corner_radius)` from the corner. `expand` shifts
+// the distance threshold outward without moving that center. Changing the
+// radius instead would move the center too, which is why the window content is
+// grown with `expand`, not by adding to the radius.
+float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius, float expand) {
+    vec2 center;
+    float radius;
+
+    if (coords.x < corner_radius.x && coords.y < corner_radius.x) {
+        radius = corner_radius.x;
+        center = vec2(radius, radius);
+    } else if (size.x - corner_radius.y < coords.x && coords.y < corner_radius.y) {
+        radius = corner_radius.y;
+        center = vec2(size.x - radius, radius);
+    } else if (size.x - corner_radius.z < coords.x && size.y - corner_radius.z < coords.y) {
+        radius = corner_radius.z;
+        center = vec2(size.x - radius, size.y - radius);
+    } else if (coords.x < corner_radius.w && size.y - corner_radius.w < coords.y) {
+        radius = corner_radius.w;
+        center = vec2(radius, size.y - radius);
+    } else {
+        return 1.0;
+    }
+
+    float dist = distance(coords, center) - expand;
+
+    // Manual smoothstep() between radius - half_px and radius + half_px
+    // to avoid a division in clamp().
+    float t = clamp((dist - radius) * niri_scale + 0.5, 0.0, 1.0);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
 }
 
 void main() {
-    vec2 pos = vec2(gl_FragCoord);
-    vec2 rel = pos.xy - box.xy;
-	float width, height;
-	if (flip_x) {
-		rel.x = box.z - rel.x;
-	}
-	if (flip_y) {
-		rel.y = box.w - rel.y;
-	}
-	if (swap_xy) {
-		rel = rel.yx;
-		width = box.w;
-		height = box.z;
-	} else {
-		width = box.z;
-		height = box.w;
-	}
-    if (radius_top > 0.0) {
-        if (rel.x < radius_top + 0.5) {
-            if (rel.y < radius_top + 0.5) {
-                vec2 p = rel - vec2(radius_top);
-                float r = length(p);
-                if (r > radius_top - 1.0) {
-                    float opacity = antialias(r, radius_top - 1.0, radius_top, fw2(r, p));
-                    gl_FragColor = vec4(texture2D(tex, v_texcoord).rgb, 1.0) * alpha * opacity;
-                    return;
-                }
-            }
-        } else if (rel.x > width - (radius_top + 0.5)) {
-            if (rel.y < radius_top + 0.5) {
-                vec2 p = rel - vec2(width - radius_top, radius_top);
-                float r = length(p);
-                if (r > radius_top - 1.0) {
-                    float opacity = antialias(r, radius_top - 1.0, radius_top, fw2(r, p));
-                    gl_FragColor = vec4(texture2D(tex, v_texcoord).rgb, 1.0) * alpha * opacity;
-                    return;
-                }
-            }
-        }
+    vec4 geo = niri_geo(gl_FragCoord.xy);
+    vec2 rel = geo.xy;
+    vec2 size = geo.zw;
+
+    if (rel.x < 0.0 || rel.x > size.x || rel.y < 0.0 || rel.y > size.y) {
+        gl_FragColor = vec4(0.0);
+        return;
     }
-    if (radius_bottom > 0.0) {
-        if (rel.x < radius_bottom + 0.5) {
-            if (rel.y > height - (radius_bottom + 0.5)) {
-                vec2 p = rel - vec2(radius_bottom, height - radius_bottom);
-                float r = length(p);
-                if (r > radius_bottom - 1.0) {
-                    float opacity = antialias(r, radius_bottom - 1.0, radius_bottom, fw2(r, p));
-                    gl_FragColor = vec4(texture2D(tex, v_texcoord).rgb, 1.0) * alpha * opacity;
-                    return;
-                }
-            }
-        } else if (rel.x > width - (radius_bottom + 0.5)) {
-            if (rel.y > height - (radius_bottom + 0.5)) {
-                vec2 p = rel - vec2(width - radius_bottom, height - radius_bottom);
-                float r = length(p);
-                if (r > radius_bottom - 1.0) {
-                    float opacity = antialias(r, radius_bottom - 1.0, radius_bottom, fw2(r, p));
-                    gl_FragColor = vec4(texture2D(tex, v_texcoord).rgb, 1.0) * alpha * opacity;
-                    return;
-                }
-            }
-        }
-    }
-	gl_FragColor = vec4(texture2D(tex, v_texcoord).rgb, 1.0) * alpha;
+
+    vec4 corner_radius = vec4(radius_top, radius_top, radius_bottom, radius_bottom);
+    // The decoration border is composited on top of the window content and
+    // cuts its inner corner at the same radius. Without help, the two
+    // antialiased edges meet at the same distance with no opaque content behind
+    // the border, so the background (and the shadow) shows through as a
+    // sub-pixel seam at the corners -- a dark/coloured fringe on light
+    // backgrounds. Grow the content's corner solid region by one physical pixel
+    // so it always tucks under the border's inner antialiasing.
+    float opacity = niri_rounding_alpha(rel, size, corner_radius, 1.0);
+
+    gl_FragColor = vec4(texture2D(tex, v_texcoord).rgb, 1.0) * opacity * alpha;
 }
