@@ -14,22 +14,6 @@ layout(binding = 0) uniform UBO {
 	vec4 color;
 } data;
 
-float antialias(float x, float x0, float x1, float fw) {
-    float xmax = max(x1, x + fw);
-    float xmin = min(x0, x - fw);
-    float len = xmax - xmin;
-    float d0 = abs(x + fw - x1);
-    float d1 = abs(x - fw - x0);
-    float overlap = len - d0 - d1;
-    float alpha = smoothstep(0.0, 1.0, overlap);
-    return alpha;
-}
-
-float fw2(float r, vec2 p) {
-    vec2 ap = abs(p);
-    return 0.5 * r / max(ap.x, ap.y);
-}
-
 // https://gitlab.gnome.org/GNOME/gtk/-/blob/gtk-4-16/gsk/gpu/shaders/gskgpuboxshadow.glsl
 #define PI 3.14159265358979323846
 #define SQRT1_2 0.70710678118654752440
@@ -86,19 +70,11 @@ float blur_corner(vec2 p, vec2 r, float sigma) {
   return step * result;
 }
 
+// Evaluated in the unified geometry space, so the flip/swap transform is not
+// applied a second time here.
 float blur_rounded_rect (vec4 r, vec2 p, float sigma) {
-	vec2 rel = p.xy - r.xy;
-	vec2 siz = r.zw;
-	if (data.flip_x) {
-		rel.x = r.z - rel.x;
-	}
-	if (data.flip_y) {
-		rel.y = r.w - rel.y;
-	}
-	if (data.swap_xy) {
-		rel = rel.yx;
-		siz = siz.yx;
-	}
+    vec2 rel = p - r.xy;
+    vec2 siz = r.zw;
   float result = blur_rect(rel, siz, sigma);
   result -= blur_corner(rel, vec2(data.radius_top, data.radius_top), sigma);
   result -= blur_corner(vec2(siz.x - rel.x, rel.y), vec2(data.radius_top, data.radius_top), sigma);
@@ -108,107 +84,91 @@ float blur_rounded_rect (vec4 r, vec2 p, float sigma) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Rounded corners, ported from niri (niri/src/render_helpers/shaders).
+// ---------------------------------------------------------------------------
+
+// niri's `niri_scale` is the output scale, because niri expresses geometry and
+// radii in logical pixels. wlroots passes both in physical pixels, so the
+// equivalent antialiasing scale is 1.0 (a one-physical-pixel transition).
+const float niri_scale = 1.0;
+
+// Unified geometry space.
+//
+// niri maps input coordinates into a window-local "geometry space" with an
+// `input_to_geo` matrix and always evaluates the rounded-corner mask there.
+// wlroots exposes the same information via `box` and the output-transform
+// flags, so this builds the equivalent mapping. It returns
+// (coords.xy, size.xy): `coords` is relative to the top-left of the
+// untransformed geometry and `size` is that geometry's size, both in physical
+// pixels.
+vec4 niri_geo(vec2 frag) {
+    vec2 rel = frag - data.box.xy;
+    if (data.flip_x) {
+        rel.x = data.box.z - rel.x;
+    }
+    if (data.flip_y) {
+        rel.y = data.box.w - rel.y;
+    }
+    vec2 size;
+    if (data.swap_xy) {
+        rel = rel.yx;
+        size = vec2(data.box.w, data.box.z);
+    } else {
+        size = vec2(data.box.z, data.box.w);
+    }
+    return vec4(rel, size);
+}
+
+// Ported verbatim from niri's rounding_alpha.frag.
+float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius) {
+    vec2 center;
+    float radius;
+
+    if (coords.x < corner_radius.x && coords.y < corner_radius.x) {
+        radius = corner_radius.x;
+        center = vec2(radius, radius);
+    } else if (size.x - corner_radius.y < coords.x && coords.y < corner_radius.y) {
+        radius = corner_radius.y;
+        center = vec2(size.x - radius, radius);
+    } else if (size.x - corner_radius.z < coords.x && size.y - corner_radius.z < coords.y) {
+        radius = corner_radius.z;
+        center = vec2(size.x - radius, size.y - radius);
+    } else if (coords.x < corner_radius.w && size.y - corner_radius.w < coords.y) {
+        radius = corner_radius.w;
+        center = vec2(radius, size.y - radius);
+    } else {
+        return 1.0;
+    }
+
+    float dist = distance(coords, center);
+
+    // Manual smoothstep() between radius - half_px and radius + half_px
+    // to avoid a division in clamp().
+    float t = clamp((dist - radius) * niri_scale + 0.5, 0.0, 1.0);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+}
+
 void main() {
 	if (!data.enabled) {
 		discard;
 	}
-    vec2 pos = vec2(gl_FragCoord);
-    vec2 rel = pos.xy - data.box.xy;
-	float width, height;
-	if (data.flip_x) {
-		rel.x = data.box.z - rel.x;
-	}
-	if (data.flip_y) {
-		rel.y = data.box.w - rel.y;
-	}
-	if (data.swap_xy) {
-		rel = rel.yx;
-		width = data.box.w;
-		height = data.box.z;
-	} else {
-		width = data.box.z;
-		height = data.box.w;
-	}
-    if (data.radius_top > 0.0) {
-        if (rel.x < data.radius_top + 0.5) {
-            if (rel.y < data.radius_top + 0.5) {
-                vec2 p = rel - vec2(data.radius_top);
-                float r = length(p);
-                if (r > data.radius_top - 1.0) {
-                    float opacity;
-					if (data.blur > 0.0) {
-						vec4 b = vec4(data.box.x + data.blur, data.box.y + data.blur, data.box.z -
-								2.0 * data.blur, data.box.w - 2.0 *	data.blur);
-						opacity = blur_rounded_rect(b, pos, data.blur);
-					} else {
-						opacity = antialias(r, data.radius_top - 1.0, data.radius_top, fw2(r, p));
-					}
-                    out_color = data.color * opacity;
-                    return;
-                }
-            }
-        } else if (rel.x > width - (data.radius_top + 0.5)) {
-            if (rel.y < data.radius_top + 0.5) {
-                vec2 p = rel - vec2(width - data.radius_top, data.radius_top);
-                float r = length(p);
-                if (r > data.radius_top - 1.0) {
-                    float opacity;
-					if (data.blur > 0.0) {
-						vec4 b = vec4(data.box.x + data.blur, data.box.y + data.blur, data.box.z -
-								2.0 * data.blur, data.box.w - 2.0 *	data.blur);
-						opacity = blur_rounded_rect(b, pos, data.blur);
-					} else {
-						opacity = antialias(r, data.radius_top - 1.0, data.radius_top, fw2(r, p));
-					}
-                    out_color = data.color * opacity;
-                    return;
-                }
-            }
-        }
+
+    vec4 geo = niri_geo(gl_FragCoord.xy);
+    vec2 rel = geo.xy;
+    vec2 size = geo.zw;
+
+    float opacity;
+    if (data.blur > 0.0) {
+        // Blurred shadow: keep the GTK-style approximation, evaluated in the
+        // unified geometry space.
+        vec4 b = vec4(data.blur, data.blur, size.x - 2.0 * data.blur, size.y - 2.0 * data.blur);
+        opacity = blur_rounded_rect(b, rel, data.blur);
+    } else {
+        // Sharp shadow: the same rounded-rectangle mask as niri's shadow.
+        vec4 corner_radius = vec4(data.radius_top, data.radius_top, data.radius_bottom, data.radius_bottom);
+        opacity = niri_rounding_alpha(rel, size, corner_radius);
     }
-    if (data.radius_bottom > 0.0) {
-        if (rel.x < data.radius_bottom + 0.5) {
-            if (rel.y > height - (data.radius_bottom + 0.5)) {
-                vec2 p = rel - vec2(data.radius_bottom, height - data.radius_bottom);
-                float r = length(p);
-                if (r > data.radius_bottom - 1.0) {
-                    float opacity;
-					if (data.blur > 0.0) {
-						vec4 b = vec4(data.box.x + data.blur, data.box.y + data.blur, data.box.z -
-								2.0 * data.blur, data.box.w - 2.0 *	data.blur);
-						opacity = blur_rounded_rect(b, pos, data.blur);
-					} else {
-						opacity = antialias(r, data.radius_bottom - 1.0, data.radius_bottom, fw2(r, p));
-					}
-                    out_color = data.color * opacity;
-                    return;
-                }
-            }
-        } else if (rel.x > width - (data.radius_bottom + 0.5)) {
-            if (rel.y > height - (data.radius_bottom + 0.5)) {
-                vec2 p = rel - vec2(width - data.radius_bottom, height - data.radius_bottom);
-                float r = length(p);
-                if (r > data.radius_bottom - 1.0) {
-                    float opacity;
-					if (data.blur > 0.0) {
-						vec4 b = vec4(data.box.x + data.blur, data.box.y + data.blur, data.box.z -
-								2.0 * data.blur, data.box.w - 2.0 *	data.blur);
-						opacity = blur_rounded_rect(b, pos, data.blur);
-					} else {
-						opacity = antialias(r, data.radius_bottom - 1.0, data.radius_bottom, fw2(r, p));
-					}
-                    out_color = data.color * opacity;
-                    return;
-                }
-            }
-        }
-    }
-	if (data.blur > 0.0) {
-		vec4 b = vec4(data.box.x + data.blur, data.box.y + data.blur, data.box.z - 2.0 * data.blur,
-				data.box.w - 2.0 * data.blur);
-		float opacity = blur_rounded_rect(b, pos, data.blur);
-		out_color = data.color * opacity;
-	} else {
-		out_color = data.color;
-	}
+
+    out_color = data.color * opacity;
 }
