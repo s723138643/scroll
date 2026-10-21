@@ -745,7 +745,7 @@ static struct sway_workspace *workspace_output_prev_next_impl(
 
 	int index = list_find(output->workspaces, workspace);
 	if (config->workspace_next_on_output_create_empty) {
-		if (index + dir >= output->workspaces->length) {
+		if (index + dir >= output->workspaces->length && !workspace_is_empty(workspace)) {
 			char *ws_name = workspace_next_name(output->wlr_output->name);
 			struct sway_workspace *ws = workspace_create(output, ws_name);
 			free(ws_name);
