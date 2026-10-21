@@ -1931,7 +1931,8 @@ static void scene_entry_render(struct render_list_entry *entry, const struct ren
 		pixman_region32_translate(&render_region, dx, dy);
 		// Clip against "mini-workspace"
 		pixman_region32_intersect_rect(&render_region, &render_region, dx, dy,
-			workspace_data.width, workspace_data.height);
+			workspace_data.width + 2, workspace_data.height + 2);
+		wlr_region_expand(&render_region, &render_region, 2);
 	}
 	logical_to_buffer_coords(&render_region, data, true);
 	pixman_region32_intersect(&render_region, &render_region, &data->damage);
