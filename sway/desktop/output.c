@@ -103,67 +103,12 @@ struct sway_workspace *output_get_active_workspace(struct sway_output *output) {
 
 struct send_frame_done_data {
 	struct timespec when;
-	int msec_until_refresh;
 	struct sway_output *output;
 };
-
-struct buffer_timer {
-	struct wl_listener destroy;
-	struct wl_event_source *frame_done_timer;
-};
-
-static int handle_buffer_timer(void *data) {
-	struct wlr_scene_surface *scene_surface = data;
-
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	wlr_scene_surface_send_frame_done(scene_surface, &now);
-	return 0;
-}
-
-static void handle_buffer_timer_destroy(struct wl_listener *listener,
-		void *data) {
-	struct buffer_timer *timer = wl_container_of(listener, timer, destroy);
-
-	wl_list_remove(&timer->destroy.link);
-	wl_event_source_remove(timer->frame_done_timer);
-	free(timer);
-}
-
-static struct buffer_timer *buffer_timer_get_or_create(struct wlr_scene_surface *scene_surface) {
-	struct wlr_scene_buffer *buffer = scene_surface->buffer;
-
-	struct buffer_timer *timer =
-		scene_descriptor_try_get(&buffer->node, SWAY_SCENE_DESC_BUFFER_TIMER);
-	if (timer) {
-		return timer;
-	}
-
-	timer = calloc(1, sizeof(struct buffer_timer));
-	if (!timer) {
-		return NULL;
-	}
-
-	timer->frame_done_timer = wl_event_loop_add_timer(server.wl_event_loop,
-		handle_buffer_timer, scene_surface);
-	if (!timer->frame_done_timer) {
-		free(timer);
-		return NULL;
-	}
-
-	scene_descriptor_assign(&buffer->node, SWAY_SCENE_DESC_BUFFER_TIMER, timer);
-
-	timer->destroy.notify = handle_buffer_timer_destroy;
-	wl_signal_add(&buffer->node.events.destroy, &timer->destroy);
-
-	return timer;
-}
 
 static void send_frame_done_iterator(struct wlr_scene_buffer *buffer,
 		int x, int y, void *user_data) {
 	struct send_frame_done_data *data = user_data;
-	struct sway_output *output = data->output;
-	int view_max_render_time = 0;
 
 	if (buffer->primary_output != data->output->scene_output) {
 		return;
@@ -173,37 +118,7 @@ static void send_frame_done_iterator(struct wlr_scene_buffer *buffer,
 	if (scene_surface == NULL) {
 		return;
 	}
-
-	struct wlr_scene_node *current = &buffer->node;
-	while (true) {
-		struct sway_view *view = scene_descriptor_try_get(current,
-			SWAY_SCENE_DESC_VIEW);
-		if (view) {
-			view_max_render_time = view->max_render_time;
-			break;
-		}
-
-		if (!current->parent) {
-			break;
-		}
-
-		current = &current->parent->node;
-	}
-
-	int delay = data->msec_until_refresh - output->max_render_time
-			- view_max_render_time;
-
-	struct buffer_timer *timer = NULL;
-
-	if (output->max_render_time != 0 && view_max_render_time != 0 && delay > 0) {
-		timer = buffer_timer_get_or_create(scene_surface);
-	}
-
-	if (timer) {
-		wl_event_source_timer_update(timer->frame_done_timer, delay);
-	} else {
-		wlr_scene_surface_send_frame_done(scene_surface, &data->when);
-	}
+	wlr_scene_surface_send_frame_done(scene_surface, &data->when);
 }
 
 static enum wlr_scale_filter_mode get_scale_filter(struct sway_output *output,
@@ -322,7 +237,15 @@ static int output_repaint_timer_handler(void *data) {
 	}
 
 	if (!wlr_output_commit_state(output->wlr_output, &pending)) {
-		sway_log(SWAY_ERROR, "Page-flip failed on output %s", output->wlr_output->name);
+		if (output->repaint_retry > 5) {
+			sway_log(SWAY_ERROR, "Page-flip failed on output %s", output->wlr_output->name);
+		} else {
+			output->repaint_retry += 1;
+			output->wlr_output->frame_pending = true;
+			wl_event_source_timer_update(output->repaint_timer, 1);
+			wlr_output_state_finish(&pending);
+			return 0;
+		}
 	} else if (animation_animating_output(output->wlr_output)) {
 		// During animation, schedule the next frame directly from the
 		// vblank-driven render path. This keeps animation frames
@@ -331,6 +254,13 @@ static int output_repaint_timer_handler(void *data) {
 		wlr_output_schedule_frame(output->wlr_output);
 	}
 	wlr_output_state_finish(&pending);
+
+	output->repaint_retry = 0;
+	// Send frame done to all visible surfaces
+	struct send_frame_done_data frame_done_data = {0};
+	clock_gettime(CLOCK_MONOTONIC, &frame_done_data.when);
+	frame_done_data.output = output;
+	wlr_scene_output_for_each_buffer(output->scene_output, send_frame_done_iterator, &frame_done_data);
 	return 0;
 }
 
@@ -398,13 +328,6 @@ static void handle_frame(struct wl_listener *listener, void *user_data) {
 		output->wlr_output->frame_pending = true;
 		wl_event_source_timer_update(output->repaint_timer, delay);
 	}
-
-	// Send frame done to all visible surfaces
-	struct send_frame_done_data data = {0};
-	clock_gettime(CLOCK_MONOTONIC, &data.when);
-	data.msec_until_refresh = msec_until_refresh;
-	data.output = output;
-	wlr_scene_output_for_each_buffer(output->scene_output, send_frame_done_iterator, &data);
 }
 
 void update_output_manager_config(struct sway_server *server) {
@@ -485,6 +408,7 @@ static void begin_destroy(struct sway_output *output) {
 
 	wl_event_source_remove(output->repaint_timer);
 	output->repaint_timer = NULL;
+	output->repaint_retry = 0;
 
 	request_modeset();
 }
@@ -625,6 +549,7 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 
 	output->repaint_timer = wl_event_loop_add_timer(server->wl_event_loop,
 		output_repaint_timer_handler, output);
+	output->repaint_retry = 0;
 
 	if (server->session_lock.lock) {
 		sway_session_lock_add_output(server->session_lock.lock, output);
