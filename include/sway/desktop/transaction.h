@@ -32,6 +32,21 @@ struct sway_workspace;
  */
 void transaction_commit_dirty(void);
 
+/**
+ * Commit dirty nodes for an interactive resize.
+ *
+ * When `no_wait` is true, a configure is still sent to the given view but the
+ * transaction does not wait for the view to commit a matching buffer before
+ * applying the new layout. This lets the compositor resize the container at
+ * the output frame rate while the client catches up asynchronously.
+ *
+ * When `force_configure` is true, a configure is sent even if the view's
+ * current size already matches the pending one. This is used when the drag
+ * ends, to make sure the client is told the final size.
+ */
+void transaction_commit_dirty_resize(struct sway_view *view, bool no_wait,
+		bool force_configure);
+
 /*
  * Same as transaction_commit_dirty, but signalling that this is a
  * client-initiated change has already taken effect.

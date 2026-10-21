@@ -15,6 +15,7 @@
 
 struct sway_seat;
 struct sway_container;
+struct sway_output;
 
 // Return true if the callback handled the button event, otherwise false.
 typedef bool (*sway_seat_button_cb_fn)(struct sway_seat *seat, uint32_t time_msec,
@@ -26,6 +27,10 @@ struct sway_seatop_impl {
 			struct wlr_input_device *device, uint32_t button,
 			enum wl_pointer_button_state state);
 	void (*pointer_motion)(struct sway_seat *seat, uint32_t time_msec);
+	// Called when `output` is about to render a frame, before the frame is
+	// built. Seatops that defer work to the output frame (for example
+	// interactive resize) can flush it here.
+	void (*frame)(struct sway_seat *seat, struct sway_output *output);
 	void (*pointer_axis)(struct sway_seat *seat,
 			struct wlr_pointer_axis_event *event);
 	void (*hold_begin)(struct sway_seat *seat,
@@ -310,6 +315,8 @@ void seatop_button(struct sway_seat *seat, uint32_t time_msec,
 		enum wl_pointer_button_state state);
 
 void seatop_pointer_motion(struct sway_seat *seat, uint32_t time_msec);
+
+void seatop_frame(struct sway_seat *seat, struct sway_output *output);
 
 void seatop_pointer_axis(struct sway_seat *seat,
 		struct wlr_pointer_axis_event *event);

@@ -89,6 +89,10 @@ void layout_init(struct sway_workspace *workspace) {
 	workspace->layout.align = ALIGN_NONE;
 	workspace->layout.align_axes = ALIGN_AXIS_NONE;
 	workspace->layout.align_container = NULL;
+	workspace->layout.resize.active = false;
+	workspace->layout.resize.container = NULL;
+	workspace->layout.resize.top = NULL;
+	workspace->layout.resize.edge = WLR_EDGE_NONE;
 	toggle_size_init(workspace);
 	ipc_event_scroller("new", workspace);
 }

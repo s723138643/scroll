@@ -123,6 +123,18 @@ struct sway_scroller {
 		double width, height;
 	} toggle_size;
 
+	// State of an interactive tiling resize. While active, the layout keeps
+	// the edge opposite to the one being dragged fixed instead of
+	// re-centering/re-aligning the resized container on every transaction.
+	struct {
+		bool active;
+		struct sway_container *container; // leaf being resized
+		struct sway_container *top;       // top level container (column/row)
+		enum wlr_edges edge;
+		double anchor_x, anchor_y;            // fixed edge of `top`
+		double leaf_anchor_x, leaf_anchor_y;  // fixed edge of `container`
+	} resize;
+
 	enum sway_layout_align align;
 	uint32_t align_axes;
 	struct sway_container *align_container;

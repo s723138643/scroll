@@ -187,6 +187,10 @@ struct sway_animation {
 };
 
 static struct sway_animation *animation = NULL;
+// Bumped every time a new animation type is requested. Transactions capture
+// this together with the type so that a type set for one transaction isn't
+// silently replaced by a later transaction merging into it.
+static uint64_t animation_type_generation = 0;
 
 static void animated_variables_clear(void);
 static void animated_variable_restart(struct sway_animated_variable *av,
@@ -425,10 +429,15 @@ void animation_set_transaction(struct sway_transaction *transaction) {
 // Set the type of the pending animation
 void animation_set_type(enum sway_animation_type anim) {
 	animation->pending.type = anim;
+	++animation_type_generation;
 }
 
 enum sway_animation_type animation_get_pending_type(void) {
 	return animation->pending.type;
+}
+
+uint64_t animation_get_type_generation(void) {
+	return animation_type_generation;
 }
 
 static struct sway_animation_path *get_path() {
@@ -590,9 +599,12 @@ void animation_interrupt(void) {
 	stop_animation();
 }
 
-void animation_begin() {
+void animation_begin(enum sway_animation_type type) {
 	stop_animation();
 	animation->current = animation->pending;
+	// The type captured by the transaction wins over the mutable pending type:
+	// it may have been reset while the transaction was waiting for clients.
+	animation->current.type = type;
 	animation->pending.type = ANIMATION_DEFAULT;
 	animation->pending.callbacks = animation->default_callbacks;
 	animation->pending.transaction = NULL;

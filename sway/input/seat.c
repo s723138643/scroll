@@ -1641,6 +1641,12 @@ void seatop_pointer_motion(struct sway_seat *seat, uint32_t time_msec) {
 	}
 }
 
+void seatop_frame(struct sway_seat *seat, struct sway_output *output) {
+	if (seat->seatop_impl && seat->seatop_impl->frame) {
+		seat->seatop_impl->frame(seat, output);
+	}
+}
+
 void seatop_pointer_axis(struct sway_seat *seat,
 		struct wlr_pointer_axis_event *event) {
 	if (seat->seatop_impl->pointer_axis) {

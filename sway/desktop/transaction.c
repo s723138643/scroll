@@ -32,6 +32,18 @@ struct sway_transaction {
 	size_t num_configures;
 	struct timespec commit_time;
 	bool disable_animations;
+	// Interactive resize: the view being resized. If resize_no_wait is set,
+	// its configure is sent but the transaction is applied without waiting
+	// for the client to commit the new buffer. resize_force_configure forces
+	// a final configure even when the size already matches the pending state.
+	struct sway_view *resize_view;
+	bool resize_no_wait;
+	bool resize_force_configure;
+	// Animation type captured when the transaction is created/updated. Using
+	// the transaction's own type avoids reading animation->pending.type,
+	// which can change (and is reset) while the transaction waits for clients.
+	enum sway_animation_type animation_type;
+	uint64_t animation_type_generation;
 };
 
 struct sway_transaction_instruction {
@@ -56,6 +68,7 @@ static struct sway_transaction *transaction_create(void) {
 	}
 	transaction->instructions = create_list();
 	transaction->workspaces = create_list();
+	transaction->animation_type = ANIMATION_DEFAULT;
 	return transaction;
 }
 
@@ -770,6 +783,54 @@ static enum sway_layout_align_axis layout_alignment_axis(struct sway_workspace *
 		axis : ALIGN_AXIS_NONE;
 }
 
+// While an interactive tiling resize is in progress, keep the edge opposite
+// to the one being dragged fixed instead of re-centering/re-aligning the
+// resized container. `active` is the container of the list being laid out:
+// the top level column/row when arranging the workspace, or the leaf itself
+// when arranging the column/row that contains it. Returns true if it has set
+// the offset.
+static bool resize_offset(struct sway_workspace *workspace,
+		enum sway_container_layout layout, list_t *children,
+		struct sway_container *active, double *offset) {
+	struct sway_scroller *scroller = &workspace->layout;
+	if (!scroller->resize.active || !scroller->resize.container) {
+		return false;
+	}
+	if (layout_overview_mode(workspace) != OVERVIEW_DISABLED) {
+		// Overview/jump have their own positioning; don't interfere.
+		return false;
+	}
+	if (layout_modifiers_get_fit(workspace) != FIT_NONE) {
+		// Fit mode re-arranges the whole workspace; keep its behavior.
+		return false;
+	}
+	bool at_top = active == scroller->resize.top &&
+		children == workspace->tiling;
+	bool at_leaf = active == scroller->resize.container && !at_top;
+	if (!at_top && !at_leaf) {
+		return false;
+	}
+	enum wlr_edges edge = scroller->resize.edge;
+	if (layout == L_HORIZ) {
+		if (!(edge & (WLR_EDGE_LEFT | WLR_EDGE_RIGHT))) {
+			return false;
+		}
+		double anchor = at_top ? scroller->resize.anchor_x :
+			scroller->resize.leaf_anchor_x;
+		*offset = (edge & WLR_EDGE_LEFT) ?
+			anchor - active->pending.width : anchor;
+		return true;
+	}
+	if (!(edge & (WLR_EDGE_TOP | WLR_EDGE_BOTTOM))) {
+		return false;
+	}
+	double anchor = at_top ? scroller->resize.anchor_y :
+		scroller->resize.leaf_anchor_y;
+	*offset = (edge & WLR_EDGE_TOP) ?
+		anchor - active->pending.height : anchor;
+	return true;
+}
+
 static void arrange_children(struct sway_workspace *workspace,
 		enum sway_container_layout layout, list_t *children,
 		struct sway_container *active, struct wlr_scene_tree *content,
@@ -812,8 +873,10 @@ static void arrange_children(struct sway_workspace *workspace,
 		pin = NULL;
 	}
 
-	double offset;
-	if (workspace->gesture.scrolling ||	layout_modifiers_get_reorder(workspace) == REORDER_LAZY || jumping) {
+	double offset = 0;
+	if (resize_offset(workspace, layout, children, active, &offset)) {
+		// Interactive resize: the anchored edge wins over centering/alignment.
+	} else if (workspace->gesture.scrolling ||	layout_modifiers_get_reorder(workspace) == REORDER_LAZY || jumping) {
 		offset = layout == L_HORIZ ? active->pending.x : active->pending.y;
 	} else {
 		uint32_t aligned = layout_alignment_axis(workspace, active, workspace_layout, layout);
@@ -1003,8 +1066,7 @@ static void set_workspace_positions(struct sway_workspace *ws,
 // But then arrange_root() computes the final positions for every container.
 // animation_set_positions() happens afterwards to set the animation variables
 // for every node, active or not, so the animation can begin.
-static void animation_set_positions(void) {
-	enum sway_animation_type type = animation_get_pending_type();
+static void animation_set_positions(enum sway_animation_type type) {
 	animation_reset_outputs();
 
 	struct sway_container *fs = root->fullscreen_global;
@@ -2114,8 +2176,10 @@ static void transaction_progress(void) {
 	if (server.queued_transaction->disable_animations) {
 		animation_config->enabled = false;
 	}
-	animation_set_positions();
-	animation_begin();
+	enum sway_animation_type animation_type =
+		server.queued_transaction->animation_type;
+	animation_set_positions(animation_type);
+	animation_begin(animation_type);
 	cursor_rebase_all();
 	if (!animation_animating()) {
 		transaction_destroy(server.queued_transaction);
@@ -2170,6 +2234,17 @@ static bool should_configure(struct sway_node *node,
 	}
 	if (!instruction->server_request) {
 		return false;
+	}
+	struct sway_transaction *transaction = instruction->transaction;
+	if (transaction->resize_view && transaction->resize_force_configure &&
+			node->sway_container->view == transaction->resize_view) {
+		// Final configure of an interactive resize: send it even if the
+		// container was already resized optimistically.
+		node->sway_container->old_content.x = instruction->container_state.content_x;
+		node->sway_container->old_content.y = instruction->container_state.content_y;
+		node->sway_container->old_content.width = instruction->container_state.content_width;
+		node->sway_container->old_content.height = instruction->container_state.content_height;
+		return true;
 	}
 	struct sway_workspace *workspace = node->sway_container->pending.workspace;
 	if (workspace && workspace->animation.s.x0 != workspace->animation.s.x1) {
@@ -2239,6 +2314,9 @@ static void transaction_commit(struct sway_transaction *transaction) {
 		struct sway_node *node = instruction->node;
 		bool hidden = node_is_view(node) && !node->destroying &&
 			!view_is_visible(node->sway_container->view);
+		bool resize_no_wait = transaction->resize_no_wait &&
+			node_is_view(node) && !node->destroying &&
+			node->sway_container->view == transaction->resize_view;
 		if (should_configure(node, instruction)) {
 			set_surface_preferred_buffer_scale(node->sway_container->view);
 			instruction->serial = view_configure(node->sway_container->view,
@@ -2246,7 +2324,7 @@ static void transaction_commit(struct sway_transaction *transaction) {
 					instruction->container_state.content_y,
 					instruction->container_state.content_width,
 					instruction->container_state.content_height);
-			if (!hidden) {
+			if (!hidden && !resize_no_wait) {
 				instruction->waiting = true;
 				++transaction->num_waiting;
 			}
@@ -2360,7 +2438,8 @@ bool transaction_notify_view_ready_by_geometry(struct sway_view *view,
 	return false;
 }
 
-static void container_save_animation_variables(struct sway_container *child) {
+static void container_save_animation_variables(struct sway_container *child,
+		enum sway_animation_type type) {
 	if (!child) {
 		return;
 	}
@@ -2369,7 +2448,6 @@ static void container_save_animation_variables(struct sway_container *child) {
 			ANIMATION_FADE_OUT);
 		return;
 	}
-	enum sway_animation_type type = animation_get_pending_type();
 	animated_variable_reset(&child->animation.x, child->current.x);
 	animated_variable_reset(&child->animation.y, child->current.y);
 	animated_variable_reset(&child->animation.w, child->current.width);
@@ -2389,19 +2467,20 @@ static void container_save_animation_variables(struct sway_container *child) {
 #endif
 }
 
-static void children_save_animation_variables(list_t *children) {
+static void children_save_animation_variables(list_t *children,
+		enum sway_animation_type type) {
 	if (!children) {
 		return;
 	}
 	for (int i = 0; i < children->length; ++i) {
 		struct sway_container *child = children->items[i];
-		container_save_animation_variables(child);
-		children_save_animation_variables(child->pending.children);
+		container_save_animation_variables(child, type);
+		children_save_animation_variables(child->pending.children, type);
 	}
 }
 
-static void workspace_save_animation_variables(struct sway_workspace *ws) {
-	enum sway_animation_type type = animation_get_pending_type();
+static void workspace_save_animation_variables(struct sway_workspace *ws,
+		enum sway_animation_type type) {
 	animated_variable_reset(&ws->animation.s,
 		ws->current.scale > 0.0 ? ws->current.scale : 1.0);
 	animated_variable_set(&ws->animation.s,
@@ -2409,12 +2488,12 @@ static void workspace_save_animation_variables(struct sway_workspace *ws) {
 	if (ws->tiling->length == 0 && ws->floating->length == 0) {
 		return;
 	}
-	children_save_animation_variables(ws->tiling);
-	children_save_animation_variables(ws->floating);
+	children_save_animation_variables(ws->tiling, type);
+	children_save_animation_variables(ws->floating, type);
 }
 
-static void layer_save_animation_variables(struct wlr_scene_tree *tree) {
-	enum sway_animation_type type = animation_get_pending_type();
+static void layer_save_animation_variables(struct wlr_scene_tree *tree,
+		enum sway_animation_type type) {
 	struct wlr_scene_node *node;
 	wl_list_for_each(node, &tree->children, link) {
 		struct sway_layer_surface *surface = scene_descriptor_try_get(node,
@@ -2443,11 +2522,12 @@ static void layer_save_animation_variables(struct wlr_scene_tree *tree) {
 	}
 }
 
-static void layers_save_animation_variables(struct sway_output *output) {
-	layer_save_animation_variables(output->layers.shell_overlay);
-	layer_save_animation_variables(output->layers.shell_top);
-	layer_save_animation_variables(output->layers.shell_bottom);
-	layer_save_animation_variables(output->layers.shell_background);
+static void layers_save_animation_variables(struct sway_output *output,
+		enum sway_animation_type type) {
+	layer_save_animation_variables(output->layers.shell_overlay, type);
+	layer_save_animation_variables(output->layers.shell_top, type);
+	layer_save_animation_variables(output->layers.shell_bottom, type);
+	layer_save_animation_variables(output->layers.shell_background, type);
 }
 
 static void save_animation_variables(struct sway_transaction *transaction) {
@@ -2457,19 +2537,20 @@ static void save_animation_variables(struct sway_transaction *transaction) {
 	if (transaction->disable_animations) {
 		anim_config->enabled = false;
 	}
+	enum sway_animation_type type = transaction->animation_type;
 
 	if (!fs) {
 		for (int j = 0; j < root->unmapped_views->length; ++j) {
 			struct sway_view *view = root->unmapped_views->items[j];
-			container_save_animation_variables(view->container);
+			container_save_animation_variables(view->container, type);
 		}
 		for (int j = 0; j < root->outputs->length; j++) {
 			struct sway_output *output = root->outputs->items[j];
-			layers_save_animation_variables(output);
+			layers_save_animation_variables(output, type);
 
 			for (int i = 0; i < output->workspaces->length; i++) {
 				struct sway_workspace *child = output->workspaces->items[i];
-				workspace_save_animation_variables(child);
+				workspace_save_animation_variables(child, type);
 			}
 		}
 	}
@@ -2505,7 +2586,14 @@ static void overview_recompute_scales() {
 }
 
 static void _transaction_commit_dirty(bool server_request, bool delayed,
-		bool disable_animations) {
+		bool disable_animations, struct sway_view *resize_view,
+		bool resize_no_wait, bool resize_force_configure) {
+	// A forced final configure may not have dirty nodes (the container was
+	// already resized optimistically), or it may not be among the dirty ones.
+	// Make sure it is part of the transaction.
+	if (resize_view && resize_force_configure && resize_view->container) {
+		node_set_dirty(&resize_view->container->node);
+	}
 	if (!server.dirty_nodes->length) {
 		return;
 	}
@@ -2519,6 +2607,23 @@ static void _transaction_commit_dirty(bool server_request, bool delayed,
 		}
 	}
 	server.pending_transaction->disable_animations = disable_animations;
+	// Capture the animation type only if a new one was requested since the
+	// transaction last saw it. This keeps e.g. the final configure of a resize
+	// using its own type even if a client-initiated commit merges into the
+	// transaction later.
+	uint64_t type_generation = animation_get_type_generation();
+	if (type_generation != server.pending_transaction->animation_type_generation) {
+		server.pending_transaction->animation_type =
+			animation_get_pending_type();
+		server.pending_transaction->animation_type_generation =
+			type_generation;
+	}
+	if (resize_view) {
+		server.pending_transaction->resize_view = resize_view;
+		server.pending_transaction->resize_no_wait = resize_no_wait;
+		server.pending_transaction->resize_force_configure =
+			resize_force_configure;
+	}
 
 	for (int i = 0; i < server.dirty_nodes->length; ++i) {
 		struct sway_node *node = server.dirty_nodes->items[i];
@@ -2535,15 +2640,21 @@ static void _transaction_commit_dirty(bool server_request, bool delayed,
 }
 
 void transaction_commit_dirty(void) {
-	_transaction_commit_dirty(true, false, false);
+	_transaction_commit_dirty(true, false, false, NULL, false, false);
 }
 
 void transaction_commit_dirty_client(void) {
-	_transaction_commit_dirty(false, true, false);
+	_transaction_commit_dirty(false, true, false, NULL, false, false);
 }
 
 void transaction_commit_dirty_delayed(void) {
-	_transaction_commit_dirty(true, true, false);
+	_transaction_commit_dirty(true, true, false, NULL, false, false);
+}
+
+void transaction_commit_dirty_resize(struct sway_view *view, bool no_wait,
+		bool force_configure) {
+	_transaction_commit_dirty(true, false, false, view, no_wait,
+		force_configure);
 }
 
 void transaction_commit_delayed(void) {
@@ -2554,5 +2665,5 @@ void transaction_commit_delayed(void) {
 }
 
 void transaction_commit_dirty_disable_animations() {
-	_transaction_commit_dirty(true, false, true);
+	_transaction_commit_dirty(true, false, true, NULL, false, false);
 }

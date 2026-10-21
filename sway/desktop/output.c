@@ -341,6 +341,15 @@ static void handle_frame(struct wl_listener *listener, void *user_data) {
 		return;
 	}
 
+	// Let seatops flush work that is intentionally deferred to the output
+	// frame (for example, interactive resize), before the frame is built.
+	if (server.input) {
+		struct sway_seat *seat;
+		wl_list_for_each(seat, &server.input->seats, link) {
+			seatop_frame(seat, output);
+		}
+	}
+
 	// Compute predicted milliseconds until the next refresh. It's used for
 	// delaying both output rendering and surface frame callbacks.
 	int msec_until_refresh = 0;

@@ -236,9 +236,15 @@ void animation_set_type(enum sway_animation_type anim);
 // for it
 enum sway_animation_type animation_get_pending_type(void);
 
+// Monotonically increasing counter bumped every time animation_set_type() is
+// called. Transactions use it to know whether the pending type belongs to
+// them or was already consumed by another transaction.
+uint64_t animation_get_type_generation(void);
+
 // Starts the pending animation if pending is true, otherwise reuse the
-// current path (for client-side transactions)
-void animation_begin();
+// current path (for client-side transactions). `type` is the animation type
+// captured by the transaction being applied.
+void animation_begin(enum sway_animation_type type);
 
 // Ends the current animation, moving all animated variables to their final
 // values
