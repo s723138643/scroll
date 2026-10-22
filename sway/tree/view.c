@@ -121,12 +121,18 @@ err:
 }
 
 static void unmapped_views_add(struct sway_view *view) {
+	if (!root) {
+		return;
+	}
 	if (list_find(root->unmapped_views, view) < 0) {
 		list_add(root->unmapped_views, view);
 	}
 }
 
 static void unmapped_views_remove(struct sway_view *view) {
+	if (!root) {
+		return;
+	}
 	int index = list_find(root->unmapped_views, view);
 	if (index >= 0) {
 		list_del(root->unmapped_views, index);
