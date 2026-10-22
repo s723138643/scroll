@@ -132,6 +132,7 @@ struct sway_output *output_create(struct wlr_output *wlr_output) {
 	if (failed) {
 		destroy_scene_layers(output);
 		wlr_scene_output_destroy(output->scene_output);
+		node_map_remove(&output->node);
 		free(output);
 		return NULL;
 	}

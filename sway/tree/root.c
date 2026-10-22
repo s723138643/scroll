@@ -69,6 +69,7 @@ struct sway_root *root_create(struct wl_display *wl_display) {
 
 	if (failed) {
 		wlr_scene_node_destroy(&root_scene->tree.node);
+		node_map_remove(&root->node);
 		free(root);
 		return NULL;
 	}

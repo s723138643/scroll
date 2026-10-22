@@ -198,6 +198,7 @@ static struct sway_layer_surface *sway_layer_surface_create(
 	struct wlr_scene_tree *popups = wlr_scene_tree_create(root->layers.popup);
 	if (!popups) {
 		sway_log(SWAY_ERROR, "Could not allocate a scene_layer popup node");
+		node_map_remove(&surface->node);
 		free(surface);
 		return NULL;
 	}
@@ -208,6 +209,7 @@ static struct sway_layer_surface *sway_layer_surface_create(
 			SWAY_SCENE_DESC_POPUP, &surface->desc)) {
 		sway_log(SWAY_ERROR, "Failed to allocate a popup scene descriptor");
 		wlr_scene_node_destroy(&popups->node);
+		node_map_remove(&surface->node);
 		free(surface);
 		return NULL;
 	}
@@ -493,6 +495,7 @@ static struct sway_layer_popup *create_popup(struct wlr_xdg_popup *wlr_popup,
 		wlr_popup->base);
 
 	if (!popup->scene) {
+		node_map_remove(&popup->node);
 		free(popup);
 		return NULL;
 	}
