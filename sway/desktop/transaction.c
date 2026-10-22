@@ -75,9 +75,13 @@ void transaction_destroy(struct sway_transaction *transaction) {
 		if (node->destroying && node->ntxnrefs == 0 && !node->dirty) {
 			switch (node->type) {
 			case N_ROOT:
-			case N_LAYER_SURFACE:
-			case N_LAYER_POPUP:
 				sway_assert(false, "Never reached");
+				break;
+			case N_LAYER_SURFACE:
+				layer_surface_destroy(node->sway_layer_surface);
+				break;
+			case N_LAYER_POPUP:
+				layer_popup_destroy(node->sway_layer_popup);
 				break;
 			case N_OUTPUT:
 				output_destroy(node->sway_output);

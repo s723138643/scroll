@@ -251,6 +251,34 @@ static struct sway_layer_surface *find_mapped_layer_by_client(
 	return NULL;
 }
 
+// Now that Layer shell nodes are included in transactions so they can be
+// animated, we need to make sure their node is not freed until their transaction
+// is destroyed.or they are no longer referenced.
+static bool layer_node_dereference(struct sway_node *node) {
+	// It may still be waiting to be included in the next transaction.
+	if (node->dirty) {
+		int idx = list_find(server.dirty_nodes, node);
+		if (idx >= 0) {
+			list_del(server.dirty_nodes, idx);
+		}
+		node->dirty = false;
+	}
+	node->destroying = true;
+	return node->ntxnrefs == 0;
+}
+
+void layer_surface_destroy(struct sway_layer_surface *surface) {
+	if (!sway_assert(surface->node.destroying,
+				"Tried to free layer surface which wasn't marked as destroying")) {
+		return;
+	}
+	if (!sway_assert(surface->node.ntxnrefs == 0, "Tried to free layer surface "
+				"which is still referenced by transactions")) {
+		return;
+	}
+	free(surface);
+}
+
 static void handle_node_destroy(struct wl_listener *listener, void *data) {
 	struct sway_layer_surface *layer =
 		wl_container_of(listener, layer, node_destroy);
@@ -291,7 +319,9 @@ static void handle_node_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&layer->link);
 	layer_surface_release_animation_variables(layer);
 	node_map_remove(&layer->node);
-	free(layer);
+	if (layer_node_dereference(&layer->node)) {
+		free(layer);
+	}
 }
 
 static void handle_surface_commit(struct wl_listener *listener, void *data) {
@@ -378,6 +408,20 @@ static void popup_handle_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&popup->reposition.link);
 	layer_popup_release_animation_variables(popup);
 	node_map_remove(&popup->node);
+	if (layer_node_dereference(&popup->node)) {
+		free(popup);
+	}
+}
+
+void layer_popup_destroy(struct sway_layer_popup *popup) {
+	if (!sway_assert(popup->node.destroying,
+				"Tried to free layer popup which wasn't marked as destroying")) {
+		return;
+	}
+	if (!sway_assert(popup->node.ntxnrefs == 0, "Tried to free layer popup "
+				"which is still referenced by transactions")) {
+		return;
+	}
 	free(popup);
 }
 

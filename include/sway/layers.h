@@ -72,4 +72,13 @@ void layer_surface_get_box(struct sway_layer_surface *surface, struct wlr_box *b
 
 void layer_popup_get_box(struct sway_layer_popup *popup, struct wlr_box *box);
 
+/**
+ * Destroy a layer surface or popup that was left alive by its destroy handler
+ * because a transaction still referenced its node. Only called from
+ * transaction_destroy() when nothing references it any more.
+ */
+void layer_surface_destroy(struct sway_layer_surface *surface);
+
+void layer_popup_destroy(struct sway_layer_popup *popup);
+
 #endif
