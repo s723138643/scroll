@@ -1212,6 +1212,35 @@ void view_update_size(struct sway_view *view) {
 	container_set_geometry_from_content(con);
 }
 
+/**
+ * Build the clip box (in surface coordinates) for a view.
+ *
+ * `width`/`height` are the size the container wants to show. The clip is
+ * also bounded by the window geometry reported by the client: CSD clients
+ * (Firefox, Zen, GTK apps) keep a transparent shadow margin around the
+ * window, so their surface is larger than the window. The container size can
+ * be out of sync with the client while it is being resized or animated, so
+ * the window geometry is the authoritative bound.
+ */
+static struct wlr_box view_clip_box(struct sway_view *view,
+		double width, double height) {
+	struct wlr_box clip = {
+		.x = view->geometry.x,
+		.y = view->geometry.y,
+		.width = (int) fmax(1.0, round(width)),
+		.height = (int) fmax(1.0, round(height)),
+	};
+
+	if (view->geometry.width > 0) {
+		clip.width = (int) fmin(clip.width, view->geometry.width);
+	}
+	if (view->geometry.height > 0) {
+		clip.height = (int) fmin(clip.height, view->geometry.height);
+	}
+
+	return clip;
+}
+
 void view_center_and_clip_surface(struct sway_view *view) {
 	struct sway_container *con = view->container;
 
@@ -1233,15 +1262,22 @@ void view_center_and_clip_surface(struct sway_view *view) {
 	if (!wl_list_empty(&con->view->content_tree->children)) {
 		struct wlr_box clip = {0};
 		if (clip_to_geometry) {
-			clip = (struct wlr_box){
-				.x = con->view->geometry.x,
-				.y = con->view->geometry.y,
-				.width = round(con->current.content_width),
-				.height = round(con->current.content_height),
-			};
+			// Use the pending size (the size the client is being configured
+			// to) rather than the current one. During jump/overview
+			// transitions the current state may still describe the previous
+			// size, which would crop the surface the client has already
+			// resized.
+			clip = view_clip_box(view, con->pending.content_width,
+				con->pending.content_height);
 		}
 		wlr_scene_subsurface_tree_set_clip(&con->view->content_tree->node, &clip);
 	}
+
+	// Refresh the surface destination size/scale as well: the workspace scale
+	// applied during jump/overview may have changed (or gone back to 1)
+	// without a frame being rendered for this view, which would leave the
+	// content scaled/offset inside its frame.
+	view_reconfigure(view);
 }
 
 struct sway_view *view_from_wlr_surface(struct wlr_surface *wlr_surface) {
@@ -1719,12 +1755,8 @@ static void clip_view(struct sway_view *view) {
 		double content_scale = view_is_content_scaled(view) ?
 			view_get_content_scale(view) : 1.0;
 		// clip == {0) means no clipping, so use at least 1
-		struct wlr_box clip = {
-			.x = view->geometry.x,
-			.y = view->geometry.y,
-			.width = (int) fmax(1.0, round(wt / content_scale)),
-			.height = (int) fmax(1.0, round(ht / content_scale))
-		};
+		struct wlr_box clip = view_clip_box(view,
+			fmax(1.0, wt / content_scale), fmax(1.0, ht / content_scale));
 		wlr_scene_subsurface_tree_set_clip(&view->content_tree->node, &clip);
 	} else {
 		bool clip_to_geometry = true;
@@ -1733,12 +1765,9 @@ static void clip_view(struct sway_view *view) {
 			clip_to_geometry = !view->using_csd;
 		}
 		if (clip_to_geometry) {
-			struct wlr_box clip = {
-				.x = view->geometry.x,
-				.y = view->geometry.y,
-				.width = round(view->container->pending.content_width),
-				.height = round(view->container->pending.content_height)
-			};
+			struct wlr_box clip = view_clip_box(view,
+				view->container->pending.content_width,
+				view->container->pending.content_height);
 			wlr_scene_subsurface_tree_set_clip(&view->content_tree->node, &clip);
 		}
 	}
