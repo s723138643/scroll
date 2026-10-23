@@ -217,6 +217,7 @@ struct sway_workspace *workspace_create(struct sway_output *output,
 		wlr_scene_node_destroy(&ws->jump.text_tree->node);
 		wlr_scene_node_destroy(&ws->jump.name_tree->node);
 		wlr_ext_workspace_handle_v1_destroy(ws->ext_workspace);
+		node_map_remove(&ws->node);
 		free(ws);
 		return NULL;
 	}

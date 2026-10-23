@@ -120,6 +120,7 @@ struct sway_container *container_create(struct sway_view *view) {
 
 	if (failed) {
 		wlr_scene_node_destroy(&c->scene_tree->node);
+		node_map_remove(&c->node);
 		free(c);
 		return NULL;
 	}
