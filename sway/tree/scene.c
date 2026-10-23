@@ -161,11 +161,19 @@ static bool scene_view_data(struct wlr_surface *surface, struct wlr_scene_view_d
 
 /**
  * Find a parent of the current node that is a popup or view. If it finds one,
- * fill scale (content scale and workspace scale)
+ * fill scale with the *content* scale of that view.
+ *
+ * Only the content scale is used here: it is a persistent surface property,
+ * so surface-local coordinates (subsurface/popup positions) can be converted
+ * to layout coordinates once. The workspace scale is a transient render-time
+ * transform and must NOT be baked into node positions: doing so left stale
+ * offsets when the workspace scale changed (e.g. Zen's content subsurface at
+ * (20,20) kept the 0.5-scaled position (10,10) after leaving jump/scale mode).
+ *
  * Returns: true if the current node is a popup or view (parent view), else false
  * (children surfaces or popups)
  */
-static bool scene_node_get_parent_total_scale(struct wlr_scene_node *node, double *scale) {
+static bool scene_node_get_parent_content_scale(struct wlr_scene_node *node, double *scale) {
 	struct wlr_scene_tree *tree;
 	if (node->type == WLR_SCENE_NODE_TREE) {
 		tree = wlr_scene_tree_from_node(node);
@@ -177,12 +185,14 @@ static bool scene_node_get_parent_total_scale(struct wlr_scene_node *node, doubl
 		// Check scene descriptor
 		struct sway_view *view = scene_descriptor_try_get(&tree->node, SWAY_SCENE_DESC_VIEW);
 		if (view && view->container) {
-			*scale = view_get_total_scale(view);
+			*scale = view_is_content_scaled(view) ?
+				view_get_content_scale(view) : -1.0;
 			return &tree->node == node;
 		}
 		struct sway_popup_desc *desc = scene_descriptor_try_get(&tree->node, SWAY_SCENE_DESC_POPUP);
 		if (desc && desc->view) {
-			*scale = view_get_total_scale(desc->view);
+			*scale = view_is_content_scaled(desc->view) ?
+				view_get_content_scale(desc->view) : -1.0;
 			return &tree->node == node;
 		}
 		tree = tree->node.parent;
@@ -195,8 +205,8 @@ static bool scene_node_get_parent_total_scale(struct wlr_scene_node *node, doubl
 
 		if (scene_surface) {
 			struct sway_view *view = view_from_wlr_surface(scene_surface->surface);
-			if (view) {
-				total_scale = view_get_total_scale(view);
+			if (view && view_is_content_scaled(view)) {
+				total_scale = view_get_content_scale(view);
 			}
 		}
 		*scale = total_scale;
@@ -244,7 +254,7 @@ const struct wlr_scene_callbacks scroll_scene_cbs = {
 	.node_at = scene_node_at,
 	.workspace_data = scene_workspace_data,
 	.view_data = scene_view_data,
-	.node_get_parent_total_scale = scene_node_get_parent_total_scale,
+	.node_get_parent_total_scale = scene_node_get_parent_content_scale,
 	.view_content_scale = scene_view_content_scale,
 	.layer_surface_data = scene_layer_surface_data,
 	.animate = animate,
