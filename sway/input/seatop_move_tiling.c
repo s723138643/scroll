@@ -12,8 +12,9 @@
 #include "sway/tree/workspace.h"
 #include "sway/desktop/animation.h"
 
-// Thickness of the dropzone when dragging to the edge of a layout container
-#define DROP_LAYOUT_BORDER 30
+// Thickness of the dropzone when dragging to the edge of a layout container,
+// as a fraction of the smaller side of the hovered container
+#define DROP_LAYOUT_BORDER_RATIO 0.2f
 
 struct seatop_move_tiling_event {
 	struct sway_container *con;
@@ -82,6 +83,33 @@ static void update_indicator(struct seatop_move_tiling_event *e, struct wlr_box 
 	wlr_scene_rect_set_size(e->indicator_rect, box->width, box->height);
 }
 
+// Bounding box (in layout coordinates) of the children of `group`, with their
+// sizes scaled by `scale`. A scaled or scrolled workspace arranges the children
+// independently of the group's own stored box, so this is what is on screen.
+static struct wlr_box group_children_box(struct sway_container *group, double scale) {
+	struct sway_container *child = group->pending.children->items[0];
+	struct wlr_box box;
+	node_get_box(&child->node, &box);
+	int left = box.x;
+	int top = box.y;
+	int right = box.x + (int)round(box.width * scale);
+	int bottom = box.y + (int)round(box.height * scale);
+	for (int i = 1; i < group->pending.children->length; ++i) {
+		child = group->pending.children->items[i];
+		node_get_box(&child->node, &box);
+		left = MIN(left, box.x);
+		top = MIN(top, box.y);
+		right = MAX(right, box.x + (int)round(box.width * scale));
+		bottom = MAX(bottom, box.y + (int)round(box.height * scale));
+	}
+	return (struct wlr_box){
+		.x = left,
+		.y = top,
+		.width = right - left,
+		.height = bottom - top,
+	};
+}
+
 static void handle_motion_postthreshold(struct sway_seat *seat) {
 	struct seatop_move_tiling_event *e = seat->seatop_data;
 	struct wlr_surface *surface = NULL;
@@ -132,81 +160,79 @@ static void handle_motion_postthreshold(struct sway_seat *seat) {
 	bool move_parent = layout_get_type(old_workspace) == layout_modifiers_get_mode(old_workspace);
 	struct sway_workspace *workspace = con->pending.workspace;
 	enum sway_container_layout layout = layout_get_type(workspace);
-	struct wlr_box node_box;
-	node_get_box(&con->node, &node_box);
-	node_box.x -= workspace->x;
-	node_box.y -= workspace->y;
-	int drop_layout_border = DROP_LAYOUT_BORDER;
-	if (layout_scale_enabled(workspace)) {
-		float scale = layout_scale_get(workspace);
-		drop_layout_border *= scale;
-		node_box.width *= scale;
-		node_box.height *= scale;
+	// Box of the hovered container in layout (screen) coordinates. Tiled
+	// containers store their position unscaled, only the size is scaled by
+	// the workspace scale.
+	struct wlr_box leaf_box;
+	node_get_box(&con->node, &leaf_box);
+	double scale = layout_scale_enabled(workspace) ? layout_scale_get(workspace) : 1.0;
+	int drop_layout_border = (int)round(
+			fmin(leaf_box.width, leaf_box.height) * DROP_LAYOUT_BORDER_RATIO * scale);
+	if (drop_layout_border < 1) {
+		drop_layout_border = 1;
 	}
-	struct wlr_box box = node_box;
-	int gap_x = 0, gap_y = 0;
-	if (move_parent) {
-		// Need a top level container
-		if (con->view) {
-			con = con->pending.parent;
-			if (layout == L_HORIZ) {
-				gap_y = workspace->gaps_inner;
-				gap_x = workspace->x;
-				box.y = workspace->y;
-				node_box.y += workspace->y;
-				box.height = workspace->height - 2 * workspace->gaps_inner;
-			} else {
-				gap_x = workspace->gaps_inner;
-				gap_y = workspace->y;
-				box.x = workspace->x;
-				node_box.x += workspace->x;
-				box.width = workspace->width - 2 * workspace->gaps_inner;
-			}
+	// Box of the whole group the drop applies to: the parent column/row when
+	// the hovered container is a leaf of the workspace layout, otherwise the
+	// hovered container itself.
+	struct wlr_box group_box = leaf_box;
+	if (move_parent && con->view) {
+		struct sway_container *parent = con->pending.parent;
+		if (parent && parent->pending.children &&
+				parent->pending.children->length > 0) {
+			con = parent;
+			group_box = group_children_box(parent, scale);
 		}
-	} else {
-		gap_x = workspace->x;
-		gap_y = workspace->y;
 	}
-	node_box.x += gap_x;
-	node_box.y += gap_y;
-	box.x += gap_x;
-	box.y += gap_y;
-	enum wlr_edges edge = WLR_EDGE_NONE;
-	int thresh_top = node_box.y + drop_layout_border;
-	int thresh_bottom = node_box.y + node_box.height - drop_layout_border;
-	int thresh_left = node_box.x + drop_layout_border;
-	int thresh_right = node_box.x + node_box.width - drop_layout_border;
+	leaf_box.width = (int)round(leaf_box.width * scale);
+	leaf_box.height = (int)round(leaf_box.height * scale);
+	int thresh_top = leaf_box.y + drop_layout_border;
+	int thresh_bottom = leaf_box.y + leaf_box.height - drop_layout_border;
+	int thresh_left = leaf_box.x + drop_layout_border;
+	int thresh_right = leaf_box.x + leaf_box.width - drop_layout_border;
 	// Map transformed cursor to real workspace
 	double cx = cursor->cursor->x;
 	double cy = cursor->cursor->y;
 	if (layout_overview_workspaces_enabled()) {
 		layout_overview_workspaces_local_to_global(workspace, &cx, &cy);
 	}
+	enum wlr_edges edge = WLR_EDGE_NONE;
 	if (cy < thresh_top) {
 		edge = WLR_EDGE_TOP;
-		if (thresh_top < box.y) thresh_top = box.y;
-		box.height = drop_layout_border;
 	} else if (cy > thresh_bottom) {
 		edge = WLR_EDGE_BOTTOM;
-		if (thresh_bottom > box.y + box.height) thresh_bottom = box.y + box.height;
-		box.y = box.y + box.height - drop_layout_border;
-		box.height = drop_layout_border;
 	} else if (cx < thresh_left) {
 		edge = WLR_EDGE_LEFT;
-		if (thresh_left < box.x) thresh_left = box.x;
-		box.width = drop_layout_border;
 	} else if (cx > thresh_right) {
 		edge = WLR_EDGE_RIGHT;
-		if (thresh_right > box.x + box.width) thresh_right = box.x + box.width;
+	}
+	// An edge parallel to the layout drops the container next to the hovered
+	// window (layout_drag_container_to_container() inserts it relative to that
+	// window), so its indicator hugs the hovered window. The remaining edges
+	// move, reorder or swap the whole target column/row, so their indicator
+	// hugs the group box, and WLR_EDGE_NONE (swap) highlights all of it.
+	bool vertical_edge = edge == WLR_EDGE_TOP || edge == WLR_EDGE_BOTTOM;
+	bool parallel_edge = edge != WLR_EDGE_NONE &&
+		(layout == L_HORIZ ? vertical_edge : !vertical_edge);
+	struct wlr_box box = parallel_edge ? leaf_box : group_box;
+	switch (edge) {
+	case WLR_EDGE_TOP:
+		box.height = drop_layout_border;
+		break;
+	case WLR_EDGE_BOTTOM:
+		box.y = box.y + box.height - drop_layout_border;
+		box.height = drop_layout_border;
+		break;
+	case WLR_EDGE_LEFT:
+		box.width = drop_layout_border;
+		break;
+	case WLR_EDGE_RIGHT:
 		box.x = box.x + box.width - drop_layout_border;
 		box.width = drop_layout_border;
-	} else {
-		// Swap
-		edge = WLR_EDGE_NONE;
-		box.width = box.width - 2 * drop_layout_border;
-		box.height = box.height - 2 * drop_layout_border;
-		box.x += drop_layout_border;
-		box.y += drop_layout_border;
+		break;
+	case WLR_EDGE_NONE:
+	default:
+		// Swap: highlight the whole group
+		break;
 	}
 	set_target_node(e, &con->node);
 	e->target_edge = edge;

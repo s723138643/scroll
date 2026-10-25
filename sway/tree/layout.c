@@ -1297,13 +1297,23 @@ static void swap_containers(struct sway_container *container, struct sway_contai
 	list_swap(workspace->tiling, cidx, tidx);
 }
 
-static void insert_children_relative(struct sway_container *container, struct sway_container *target, int offset) {
+// Move the children of `container` into `target`, right before (after == false)
+// or right after (after == true) the hovered container `relative_to`. When the
+// drop was not made over a view, fall back to the target's focused child.
+static void insert_children_relative(struct sway_container *container,
+		struct sway_container *target, struct sway_container *relative_to,
+		bool after) {
 	struct sway_workspace *old_workspace = container->pending.workspace;
 	int cidx = list_find(old_workspace->tiling, container);
 	remove_active_parent_container_from_workspace(cidx, old_workspace);
-	int idx = list_find(target->pending.children, target->current.focused_inactive_child);
+	int offset = after ? target->pending.children->length : 0;
+	if (!relative_to) {
+		relative_to = target->current.focused_inactive_child;
+	}
+	int idx = relative_to ?
+		list_find(target->pending.children, relative_to) : -1;
 	if (idx >= 0) {
-		offset = offset == 0 ? idx : idx + 1;
+		offset = after ? idx + 1 : idx;
 	}
 	list_t *children = container->pending.children;
 	while (children->length > 0) {
@@ -1429,6 +1439,9 @@ void layout_drag_container_to_container(struct sway_container *container, struct
 	if (move_parent) {
 		// Get parent (top level container)
 		container = container->pending.parent;
+		// Container the parallel (top/bottom or left/right) drop is relative
+		// to: the hovered view, which is what the drag indicator highlights.
+		struct sway_container *relative_to = target->view ? target : NULL;
 		if (target->view) {
 			target = target->pending.parent;
 		}
@@ -1439,11 +1452,11 @@ void layout_drag_container_to_container(struct sway_container *container, struct
 			switch (edge) {
 			case WLR_EDGE_TOP:
 				// Parallel
-				insert_children_relative(container, target, 0);
+				insert_children_relative(container, target, relative_to, false);
 				break;
 			case WLR_EDGE_BOTTOM:
 				// Parallel
-				insert_children_relative(container, target, target->pending.children->length);
+				insert_children_relative(container, target, relative_to, true);
 				break;
 			case WLR_EDGE_LEFT:
 				// Move container
@@ -1470,11 +1483,11 @@ void layout_drag_container_to_container(struct sway_container *container, struct
 				break;
 			case WLR_EDGE_LEFT:
 				// Parallel
-				insert_children_relative(container, target, 0);
+				insert_children_relative(container, target, relative_to, false);
 				break;
 			case WLR_EDGE_RIGHT:
 				// Parallel
-				insert_children_relative(container, target, target->pending.children->length);
+				insert_children_relative(container, target, relative_to, true);
 				break;
 			case WLR_EDGE_NONE:
 				// Swap containers
